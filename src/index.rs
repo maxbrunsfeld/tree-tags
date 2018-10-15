@@ -9,7 +9,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
-use tree_sitter::{Parser, Point, PropertyMatcher, PropertySheet, Tree};
+use tree_sitter::{Parser, Point, TreePropertyCursor, PropertySheet, Tree};
 
 #[derive(Debug)]
 pub enum Error {
@@ -36,7 +36,7 @@ struct Scope<'a> {
 struct Walker<'a> {
     scope_stack: Vec<Scope<'a>>,
     db: Transaction<'a>,
-    property_matcher: PropertyMatcher<'a>,
+    property_matcher: TreePropertyCursor<'a>,
     source_code: &'a str,
     file_id: i64,
 }
@@ -52,7 +52,7 @@ impl<'a> Walker<'a> {
         Self {
             db,
             source_code,
-            property_matcher: PropertyMatcher::new(tree, property_sheet),
+            property_matcher: tree.walk_with_properties(property_sheet),
             scope_stack: Vec::new(),
             file_id,
         }
