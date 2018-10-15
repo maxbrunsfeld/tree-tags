@@ -21,6 +21,7 @@ const DYLIB_EXTENSION: &'static str = "dll";
 
 pub struct LanguageRegistry {
     config_path: PathBuf,
+    parser_dirs: Vec<PathBuf>,
     language_names_by_extension: HashMap<String, (String, PathBuf)>,
     loaded_languages: HashMap<String, (Library, Language, Arc<PropertySheet>)>,
 }
@@ -29,9 +30,17 @@ unsafe impl Send for LanguageRegistry {}
 unsafe impl Sync for LanguageRegistry {}
 
 impl LanguageRegistry {
-    pub fn new(config_path: PathBuf, parser_dirs: Vec<PathBuf>) -> io::Result<Self> {
-        let mut language_names_by_extension = HashMap::new();
-        for parser_container_dir in parser_dirs.iter() {
+    pub fn new(config_path: PathBuf, parser_dirs: Vec<PathBuf>) -> Self {
+        LanguageRegistry {
+            config_path,
+            parser_dirs,
+            language_names_by_extension: HashMap::new(),
+            loaded_languages: HashMap::new(),
+        }
+    }
+
+    pub fn load_parsers(&mut self) -> io::Result<()> {
+        for parser_container_dir in self.parser_dirs.iter() {
             for entry in fs::read_dir(parser_container_dir)? {
                 let entry = entry?;
                 if let Some(parser_dir_name) = entry.file_name().to_str() {
@@ -42,7 +51,7 @@ impl LanguageRegistry {
                             Ok(None) => {},
                             Ok(Some(extensions)) => {
                                 for extension in extensions {
-                                    language_names_by_extension.insert(
+                                    self.language_names_by_extension.insert(
                                         extension.to_owned(),
                                         (name.to_owned(), entry.path())
                                     );
@@ -56,12 +65,7 @@ impl LanguageRegistry {
                 }
             }
         }
-
-        Ok(LanguageRegistry {
-            config_path,
-            loaded_languages: HashMap::new(),
-            language_names_by_extension,
-        })
+        Ok(())
     }
 
     pub fn language_for_file_extension(&mut self, extension: &str) -> io::Result<Option<(Language, Arc<PropertySheet>)>> {

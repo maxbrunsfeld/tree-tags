@@ -34,7 +34,7 @@ fn main() -> index::Result<()> {
         .get_matches();
 
     let config_dir = dirs::home_dir().unwrap().join(".config/tree-tags");
-    let mut index = index::Index::new(config_dir)?;
+    let mut index = index::Index::new(config_dir);
 
     if let Some(matches) = matches.subcommand_matches("index") {
         index.index_path(matches.value_of("path").unwrap().into())?;

@@ -236,8 +236,8 @@ impl<'a> Walker<'a> {
 }
 
 impl Index {
-    pub fn new(config_dir: PathBuf) -> Result<Self> {
-        Ok(Index {
+    pub fn new(config_dir: PathBuf) -> Self {
+        Index {
             db_path: config_dir.join("db.sqlite"),
             language_registry: Arc::new(Mutex::new(LanguageRegistry::new(
                 config_dir,
@@ -245,11 +245,12 @@ impl Index {
 
                     "/Users/max/github".into()
                 ],
-            )?)),
-        })
+            ))),
+        }
     }
 
     pub fn index_path(&mut self, path: PathBuf) -> Result<()> {
+        self.language_registry.lock().unwrap().load_parsers()?;
         let last_error = Arc::new(Mutex::new(Ok(())));
         let db = Connection::open(&self.db_path)?;
         db.execute_batch(include_str!("./schema.sql")).expect("Failed to ensure schema is set up");
