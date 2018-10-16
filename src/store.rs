@@ -3,6 +3,8 @@ use std::ffi::OsString;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use tree_sitter::Point;
+use std::thread;
+use std::time::Duration;
 
 pub struct Store {
     db: Connection,
@@ -18,6 +20,10 @@ impl Store {
     pub fn new(db_path: PathBuf) -> rusqlite::Result<Self> {
         let db = Connection::open(&db_path)?;
         db.set_prepared_statement_cache_capacity(20);
+        db.busy_handler(Some(|_| {
+            thread::sleep(Duration::from_millis(25));
+            true
+        }))?;
         Ok(Self { db, path: db_path })
     }
 

@@ -7,12 +7,13 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use tree_sitter::{Parser, Point, PropertySheet, Tree, TreePropertyCursor};
+use tree_sitter::{Language, Parser, Point, PropertySheet, Tree, TreePropertyCursor};
 
 pub struct DirCrawler {
     store: Store,
     language_registry: Arc<Mutex<LanguageRegistry>>,
     parser: Parser,
+    languages_by_extension: HashMap<String, (Language, Arc<PropertySheet>)>,
 }
 
 struct TreeCrawler<'a> {
@@ -326,6 +327,7 @@ impl DirCrawler {
             store: store,
             language_registry: Arc::new(Mutex::new(language_registry)),
             parser: Parser::new(),
+            languages_by_extension: HashMap::new(),
         }
     }
 
@@ -334,6 +336,7 @@ impl DirCrawler {
             store: self.store.clone()?,
             language_registry: self.language_registry.clone(),
             parser: Parser::new(),
+            languages_by_extension: self.languages_by_extension.clone(),
         })
     }
 
@@ -376,26 +379,38 @@ impl DirCrawler {
     fn crawl_file(&mut self, path: &Path) -> Result<()> {
         let mut file = File::open(path)?;
         if let Some(extension) = path.extension().and_then(|e| e.to_str()) {
-            if let Some((language, property_sheet)) = self
+            let language;
+            let property_sheet;
+
+            if let Some((l, p)) = self.languages_by_extension.get(extension) {
+                language = *l;
+                property_sheet = p.clone();
+            } else if let Some((l, p)) = self
                 .language_registry
                 .lock()
                 .unwrap()
                 .language_for_file_extension(extension)?
             {
-                self.parser
-                    .set_language(language)
-                    .expect("Incompatible language version");
-                let mut source_code = String::new();
-                file.read_to_string(&mut source_code)?;
-                let tree = self
-                    .parser
-                    .parse_str(&source_code, None)
-                    .expect("Parsing failed");
-                let store = self.store.file(path)?;
-                let mut crawler = TreeCrawler::new(store, &tree, &property_sheet, &source_code);
-                crawler.crawl_tree()?;
-                crawler.store.commit()?;
+                self.languages_by_extension.insert(extension.to_owned(), (l, p.clone()));
+                language = l;
+                property_sheet = p;
+            } else {
+                return Ok(());
             }
+
+            self.parser
+                .set_language(language)
+                .expect("Incompatible language version");
+            let mut source_code = String::new();
+            file.read_to_string(&mut source_code)?;
+            let tree = self
+                .parser
+                .parse_str(&source_code, None)
+                .expect("Parsing failed");
+            let store = self.store.file(path)?;
+            let mut crawler = TreeCrawler::new(store, &tree, &property_sheet, &source_code);
+            crawler.crawl_tree()?;
+            crawler.store.commit()?;
         }
         Ok(())
     }
