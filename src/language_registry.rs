@@ -20,8 +20,8 @@ const DYLIB_EXTENSION: &'static str = "so";
 const DYLIB_EXTENSION: &'static str = "dll";
 
 pub struct LanguageRegistry {
-    config_path: PathBuf,
-    parser_dirs: Vec<PathBuf>,
+    parser_src_paths: Vec<PathBuf>,
+    parser_lib_path: PathBuf,
     language_names_by_extension: HashMap<String, (String, PathBuf)>,
     loaded_languages: HashMap<String, (Library, Language, Arc<PropertySheet>)>,
 }
@@ -30,17 +30,17 @@ unsafe impl Send for LanguageRegistry {}
 unsafe impl Sync for LanguageRegistry {}
 
 impl LanguageRegistry {
-    pub fn new(config_path: PathBuf, parser_dirs: Vec<PathBuf>) -> Self {
+    pub fn new(parser_lib_path: PathBuf, parser_src_paths: Vec<PathBuf>) -> Self {
         LanguageRegistry {
-            config_path,
-            parser_dirs,
+            parser_lib_path,
+            parser_src_paths,
             language_names_by_extension: HashMap::new(),
             loaded_languages: HashMap::new(),
         }
     }
 
     pub fn load_parsers(&mut self) -> io::Result<()> {
-        for parser_container_dir in self.parser_dirs.iter() {
+        for parser_container_dir in self.parser_src_paths.iter() {
             for entry in fs::read_dir(parser_container_dir)? {
                 let entry = entry?;
                 if let Some(parser_dir_name) = entry.file_name().to_str() {
@@ -85,7 +85,7 @@ impl LanguageRegistry {
         language_path: &Path,
     ) -> io::Result<Option<(Language, Arc<PropertySheet>)>> {
         let parser_c_path = language_path.join(PARSER_C_PATH);
-        let mut library_path = self.config_path.join("lib").join(name);
+        let mut library_path = self.parser_lib_path.join(name);
         library_path.set_extension(DYLIB_EXTENSION);
 
         if !library_path.exists() || was_modified_more_recently(&parser_c_path, &library_path)? {

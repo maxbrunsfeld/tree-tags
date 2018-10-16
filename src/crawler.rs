@@ -1,30 +1,26 @@
 use crate::language_registry::LanguageRegistry;
+use crate::store::{Store, StoreFile};
 use ignore::{WalkBuilder, WalkState};
-use rusqlite::{self, Connection, Transaction};
 use std::collections::HashMap;
-use std::ffi::OsString;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Read};
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tree_sitter::{Parser, Point, PropertySheet, Tree, TreePropertyCursor};
 
-#[derive(Debug)]
-pub enum Error {
-    IO(io::Error),
-    Ignore(ignore::Error),
-    SQL(rusqlite::Error),
+pub struct DirCrawler {
+    store: Store,
+    language_registry: Arc<Mutex<LanguageRegistry>>,
+    parser: Parser,
 }
 
-pub type Result<T> = core::result::Result<T, Error>;
-
-#[derive(Clone)]
-pub struct Index {
-    db_path: PathBuf,
-    language_registry: Arc<Mutex<LanguageRegistry>>,
+struct TreeCrawler<'a> {
+    store: StoreFile<'a>,
+    scope_stack: Vec<Scope<'a>>,
+    module_stack: Vec<Module<'a>>,
+    property_matcher: TreePropertyCursor<'a>,
+    source_code: &'a str,
 }
 
 struct Definition<'a> {
@@ -47,34 +43,32 @@ struct Scope<'a> {
     hoisted_local_defs: HashMap<&'a str, Point>,
 }
 
-struct Walker<'a> {
-    scope_stack: Vec<Scope<'a>>,
-    module_stack: Vec<Module<'a>>,
-    db: Transaction<'a>,
-    property_matcher: TreePropertyCursor<'a>,
-    source_code: &'a str,
-    file_id: i64,
+#[derive(Debug)]
+pub enum Error {
+    IO(io::Error),
+    Ignore(ignore::Error),
+    SQL(rusqlite::Error),
 }
 
-impl<'a> Walker<'a> {
+pub type Result<T> = core::result::Result<T, Error>;
+
+impl<'a> TreeCrawler<'a> {
     fn new(
-        db: Transaction<'a>,
-        file_id: i64,
+        store: StoreFile<'a>,
         tree: &'a Tree,
         property_sheet: &'a PropertySheet,
         source_code: &'a str,
     ) -> Self {
         Self {
-            db,
+            store,
             source_code,
             property_matcher: tree.walk_with_properties(property_sheet),
             scope_stack: Vec::new(),
             module_stack: Vec::new(),
-            file_id,
         }
     }
 
-    fn index_tree(&mut self) -> Result<()> {
+    fn crawl_tree(&mut self) -> Result<()> {
         self.push_scope(None);
         self.push_module();
         let mut visited_node = false;
@@ -173,7 +167,7 @@ impl<'a> Walker<'a> {
 
         if self.has_property("reference") {
             if let Some(text) = node.utf8_text(self.source_code).ok() {
-                self.insert_ref(
+                self.store.insert_ref(
                     text,
                     node.start_position(),
                     self.get_property("reference-type"),
@@ -236,12 +230,12 @@ impl<'a> Walker<'a> {
 
         let mut local_def_ids = Vec::with_capacity(scope.local_defs.len());
         for (name, position) in scope.local_defs.iter() {
-            local_def_ids.push(self.insert_local_def(name, *position)?);
+            local_def_ids.push(self.store.insert_local_def(name, *position)?);
         }
 
         let mut hoisted_local_def_ids = HashMap::new();
         for (name, position) in scope.hoisted_local_defs.iter() {
-            hoisted_local_def_ids.insert(name, self.insert_local_def(name, *position)?);
+            hoisted_local_def_ids.insert(name, self.store.insert_local_def(name, *position)?);
         }
 
         let mut parent_scope = self.scope_stack.pop();
@@ -262,7 +256,8 @@ impl<'a> Walker<'a> {
             }
 
             if let Some(local_def_id) = local_def_id {
-                self.insert_local_ref(local_def_id, local_ref.0, local_ref.1)?;
+                self.store
+                    .insert_local_ref(local_def_id, local_ref.0, local_ref.1)?;
             } else if let Some(parent_scope) = parent_scope.as_mut() {
                 parent_scope.local_refs.push(local_ref);
             }
@@ -289,7 +284,7 @@ impl<'a> Walker<'a> {
         let module = self.module_stack.pop().unwrap();
         for definition in module.definitions {
             if let Some((name, name_position)) = definition.name {
-                self.insert_def(
+                self.store.insert_def(
                     name,
                     name_position,
                     definition.start_position,
@@ -319,144 +314,42 @@ impl<'a> Walker<'a> {
     fn has_property(&self, prop: &'static str) -> bool {
         self.get_property(prop).is_some()
     }
-
-    fn insert_local_ref(
-        &mut self,
-        local_def_id: i64,
-        name: &'a str,
-        position: Point,
-    ) -> Result<()> {
-        self.db.execute(
-            "
-                INSERT INTO local_refs
-                (file_id, definition_id, row, column, length)
-                VALUES
-                (?1, ?2, ?3, ?4, ?5)
-            ",
-            &[
-                &self.file_id,
-                &local_def_id,
-                &position.row,
-                &position.column,
-                &(name.as_bytes().len() as i64),
-            ],
-        )?;
-        Ok(())
-    }
-
-    fn insert_local_def(&mut self, name: &'a str, position: Point) -> Result<i64> {
-        self.db.execute(
-            "
-                INSERT INTO local_defs
-                (file_id, row, column, length)
-                VALUES
-                (?1, ?2, ?3, ?4)
-            ",
-            &[
-                &self.file_id,
-                &position.row,
-                &position.column,
-                &(name.as_bytes().len() as i64),
-            ],
-        )?;
-        Ok(self.db.last_insert_rowid())
-    }
-
-    fn insert_ref(&mut self, name: &'a str, position: Point, kind: Option<&'a str>) -> Result<()> {
-        self.db.execute(
-            "
-                INSERT INTO refs
-                (file_id, name, row, column, kind)
-                VALUES
-                (?1, ?2, ?3, ?4, ?5)
-            ",
-            &[&self.file_id, &name, &position.row, &position.column, &kind],
-        )?;
-        Ok(())
-    }
-
-    fn insert_def(
-        &mut self,
-        name: &'a str,
-        name_position: Point,
-        start_position: Point,
-        end_position: Point,
-        kind: Option<&'a str>,
-        module_path: &Vec<&'a str>,
-    ) -> Result<()> {
-        let mut module_path_string = String::with_capacity(
-            module_path
-                .iter()
-                .map(|entry| entry.as_bytes().len() + 1)
-                .sum(),
-        );
-        for entry in module_path {
-            module_path_string += entry;
-            module_path_string += "\t";
-        }
-        self.db.execute(
-            "
-                INSERT INTO defs
-                (
-                    file_id,
-                    start_row, start_column,
-                    end_row, end_column,
-                    name, name_start_row, name_start_column,
-                    kind,
-                    module_path
-                )
-                VALUES
-                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-            ",
-            &[
-                &self.file_id,
-                &start_position.row,
-                &start_position.column,
-                &end_position.row,
-                &end_position.column,
-                &name,
-                &name_position.row,
-                &name_position.column,
-                &kind,
-                &module_path_string,
-            ],
-        )?;
-        Ok(())
-    }
 }
 
-impl Index {
-    pub fn new(config_dir: PathBuf) -> Self {
-        Index {
-            db_path: config_dir.join("db.sqlite"),
-            language_registry: Arc::new(Mutex::new(LanguageRegistry::new(
-                config_dir,
-                vec!["/Users/max/github".into()],
-            ))),
+impl DirCrawler {
+    pub fn new(store: Store, language_registry: LanguageRegistry) -> Self {
+        Self {
+            store: store,
+            language_registry: Arc::new(Mutex::new(language_registry)),
+            parser: Parser::new(),
         }
     }
 
-    pub fn index_path(&mut self, path: PathBuf) -> Result<()> {
-        self.language_registry.lock().unwrap().load_parsers()?;
+    fn clone(&self) -> Result<Self> {
+        Ok(Self {
+            store: self.store.clone()?,
+            language_registry: self.language_registry.clone(),
+            parser: Parser::new(),
+        })
+    }
+
+    pub fn crawl_path(&mut self, path: PathBuf) -> Result<()> {
         let last_error = Arc::new(Mutex::new(Ok(())));
-        let db = Connection::open(&self.db_path)?;
-        db.execute_batch(include_str!("./schema.sql"))
+
+        self.store
+            .initialize()
             .expect("Failed to ensure schema is set up");
 
         WalkBuilder::new(path).threads(1).build_parallel().run(|| {
-            let worker = self.clone();
             let last_error = last_error.clone();
-            let mut parser = Parser::new();
-            match Connection::open(&self.db_path) {
-                Ok(mut db) => Box::new({
+            match self.clone() {
+                Ok(mut crawler) => Box::new({
                     move |entry| {
                         match entry {
                             Ok(entry) => {
                                 if let Some(t) = entry.file_type() {
                                     if t.is_file() {
-                                        if let Err(e) =
-                                            worker.index_file(&mut db, &mut parser, entry.path())
-                                        {
+                                        if let Err(e) = crawler.crawl_file(entry.path()) {
                                             *last_error.lock().unwrap() = Err(e);
                                             return WalkState::Quit;
                                         }
@@ -480,95 +373,7 @@ impl Index {
         Arc::try_unwrap(last_error).unwrap().into_inner().unwrap()
     }
 
-    pub fn find_definition(
-        &mut self,
-        path: PathBuf,
-        position: Point,
-    ) -> Result<Vec<(PathBuf, Point, usize)>> {
-        let db = Connection::open(&self.db_path)?;
-        let file_id: i64 = db.query_row(
-            "SELECT id FROM files WHERE path = ?1",
-            &[&path.as_os_str().as_bytes()],
-            |row| row.get(0),
-        )?;
-
-        let local_result = db.query_row(
-            "
-                SELECT
-                    local_defs.row,
-                    local_defs.column,
-                    local_defs.length
-                FROM
-                    local_refs,
-                    local_defs
-                WHERE
-                    local_refs.definition_id = local_defs.id AND
-                    local_refs.file_id = ?1 AND
-                    local_refs.row = ?2 AND
-                    local_refs.column <= ?3 AND
-                    local_refs.column + local_refs.length > ?3
-            ",
-            &[&file_id, &(position.row as i64), &(position.column as i64)],
-            |row| {
-                (
-                    Point {
-                        row: row.get(0),
-                        column: row.get(1),
-                    },
-                    row.get::<usize, i64>(2),
-                )
-            },
-        );
-
-        match local_result {
-            Err(rusqlite::Error::QueryReturnedNoRows) => {}
-            Ok((position, length)) => return Ok(vec![(path, position, length as usize)]),
-            Err(e) => return Err(e.into()),
-        }
-
-        let mut statement = db.prepare(
-            "
-                SELECT
-                    files.path,
-                    defs.name_start_row,
-                    defs.name_start_column,
-                    length(defs.name)
-                FROM
-                    files,
-                    defs,
-                    refs
-                WHERE
-                    files.id == defs.file_id AND
-                    defs.name = refs.name AND
-                    refs.file_id = ?1 AND
-                    refs.row = ?2 AND
-                    refs.column <= ?3 AND
-                    refs.column + length(refs.name) > ?3
-                LIMIT
-                    50
-            ",
-        )?;
-
-        let rows = statement.query_map(
-            &[&file_id, &(position.row as i64), &(position.column as i64)],
-            |row| {
-                (
-                    OsString::from_vec(row.get::<usize, Vec<u8>>(0)).into(),
-                    Point::new(row.get(1), row.get(2)),
-                    row.get::<usize, i64>(3) as usize,
-                )
-            },
-        )?;
-
-        let mut result = Vec::new();
-        for row in rows {
-            result.push(row?);
-        }
-
-        Ok(result)
-    }
-
-    fn index_file(&self, db: &mut Connection, parser: &mut Parser, path: &Path) -> Result<()> {
+    fn crawl_file(&mut self, path: &Path) -> Result<()> {
         let mut file = File::open(path)?;
         if let Some(extension) = path.extension().and_then(|e| e.to_str()) {
             if let Some((language, property_sheet)) = self
@@ -577,27 +382,19 @@ impl Index {
                 .unwrap()
                 .language_for_file_extension(extension)?
             {
-                parser
+                self.parser
                     .set_language(language)
                     .expect("Incompatible language version");
                 let mut source_code = String::new();
                 file.read_to_string(&mut source_code)?;
-                let tree = parser
+                let tree = self
+                    .parser
                     .parse_str(&source_code, None)
                     .expect("Parsing failed");
-                let tx = db.transaction()?;
-                tx.execute(
-                    "DELETE FROM files WHERE path = ?1",
-                    &[&path.as_os_str().as_bytes()],
-                )?;
-                tx.execute(
-                    "INSERT INTO files (path) VALUES (?1)",
-                    &[&path.as_os_str().as_bytes()],
-                )?;
-                let file_id = tx.last_insert_rowid();
-                let mut walker = Walker::new(tx, file_id, &tree, &property_sheet, &source_code);
-                walker.index_tree()?;
-                walker.db.commit()?;
+                let store = self.store.file(path)?;
+                let mut crawler = TreeCrawler::new(store, &tree, &property_sheet, &source_code);
+                crawler.crawl_tree()?;
+                crawler.store.commit()?;
             }
         }
         Ok(())
