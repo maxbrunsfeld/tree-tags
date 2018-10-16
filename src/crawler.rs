@@ -340,10 +340,6 @@ impl DirCrawler {
     pub fn crawl_path(&mut self, path: PathBuf) -> Result<()> {
         let last_error = Arc::new(Mutex::new(Ok(())));
 
-        self.store
-            .initialize()
-            .expect("Failed to ensure schema is set up");
-
         WalkBuilder::new(path).build_parallel().run(|| {
             let last_error = last_error.clone();
             match self.clone() {

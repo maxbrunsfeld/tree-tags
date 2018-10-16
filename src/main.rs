@@ -48,6 +48,10 @@ fn main() -> crawler::Result<()> {
         vec![parsers_path]
     );
 
+    store
+        .initialize()
+        .expect("Failed to initialize database schema");
+
     if let Some(matches) = matches.subcommand_matches("index") {
         language_registry.load_parsers()?;
         let mut crawler = crawler::DirCrawler::new(store, language_registry);
