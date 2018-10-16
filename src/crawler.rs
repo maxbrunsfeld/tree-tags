@@ -97,7 +97,7 @@ impl<'a> TreeCrawler<'a> {
         let node = self.property_matcher.node();
         let mut is_local_def = false;
 
-        if self.has_property("local-definition") {
+        if self.has_property_value("local-definition", "true") {
             is_local_def = true;
             let scope_type = self.get_property("scope-type");
             let is_hoisted = self.has_property("local-is-hoisted");
@@ -114,7 +114,7 @@ impl<'a> TreeCrawler<'a> {
             }
         }
 
-        if self.has_property("local-reference") && !is_local_def {
+        if self.has_property_value("local-reference", "true") && !is_local_def {
             if let Some(text) = node.utf8_text(self.source_code).ok() {
                 self.top_scope(self.get_property("scope-type"))
                     .local_refs
@@ -122,11 +122,11 @@ impl<'a> TreeCrawler<'a> {
             }
         }
 
-        if self.has_property("local-scope") {
+        if self.has_property_value("local-scope", "true") {
             self.push_scope(self.get_property("scope-type"));
         }
 
-        if self.has_property("module") {
+        if self.has_property_value("module", "true") {
             self.push_module();
         }
 
@@ -140,7 +140,7 @@ impl<'a> TreeCrawler<'a> {
             _ => {}
         }
 
-        if self.has_property("definition") {
+        if self.has_property_value("definition", "true") {
             let kind = self.get_property("definition-type");
             self.top_module().pending_definition_stack.push(Definition {
                 name: None,
@@ -165,7 +165,7 @@ impl<'a> TreeCrawler<'a> {
             _ => {}
         }
 
-        if self.has_property("reference") {
+        if self.has_property_value("reference", "true") {
             if let Some(text) = node.utf8_text(self.source_code).ok() {
                 self.store.insert_ref(
                     text,
@@ -314,6 +314,10 @@ impl<'a> TreeCrawler<'a> {
     fn has_property(&self, prop: &'static str) -> bool {
         self.get_property(prop).is_some()
     }
+
+    fn has_property_value(&self, prop: &'static str, value: &'static str) -> bool {
+        self.get_property(prop) == Some(value)
+    }
 }
 
 impl DirCrawler {
@@ -340,7 +344,7 @@ impl DirCrawler {
             .initialize()
             .expect("Failed to ensure schema is set up");
 
-        WalkBuilder::new(path).threads(1).build_parallel().run(|| {
+        WalkBuilder::new(path).build_parallel().run(|| {
             let last_error = last_error.clone();
             match self.clone() {
                 Ok(mut crawler) => Box::new({
