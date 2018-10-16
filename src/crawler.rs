@@ -154,7 +154,10 @@ impl<'a> TreeCrawler<'a> {
         match self.get_property("definition-part") {
             Some("name") => {
                 if let Some(text) = node.utf8_text(self.source_code).ok() {
-                    self.top_definition().unwrap().name = Some((text, node.start_position()));
+                    let def = self.top_definition().unwrap();
+                    if def.name.is_none() {
+                        def.name = Some((text, node.start_position()));
+                    }
                 }
             }
             Some("value") => {
@@ -166,7 +169,7 @@ impl<'a> TreeCrawler<'a> {
             _ => {}
         }
 
-        if self.has_property_value("reference", "true") {
+        if self.has_property_value("reference", "true") && !is_local_def {
             if let Some(text) = node.utf8_text(self.source_code).ok() {
                 self.store.insert_ref(
                     text,
